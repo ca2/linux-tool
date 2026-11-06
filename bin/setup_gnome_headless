@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+# Configure a persistent, single-user GNOME headless RDP session on Manjaro.
+# Run as the desktop user, not through sudo. Requires a working GDM installation.
+set -Eeuo pipefail
+
+usage() {
+   cat <<'HELP'
+Usage: bash setup_gnome_headless [OPTIONS]
+
+  --port PORT          RDP listening port (default: 3391)
+  --defer-start        Configure and enable services; start later, after logout
+  --install-packages   Allow an interactive full pacman upgrade and install
+  --check              Check prerequisites without changing configuration
+  -h, --help           Show this help
+
+Run as the intended GNOME user (for example camilo), not as root.
+Credentials are entered through grdctl's interactive prompt on each setup run.
+Existing TLS files are reused. Existing Remote Login/Desktop Sharing services,
+firewall rules, forwarding rules, and display-manager selection are unchanged.
+
+Examples:
+  bash setup_gnome_headless --check
+  bash setup_gnome_headless --defer-start --port 3391
+  bash setup_gnome_headless --install-packages
+
+The headless session is a separate desktop. Save work and log out of this user's
+local graphical session before starting it. Use SSH to start after logging out.
+HELP
+}
+
+fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+note() { printf '%s\n' "$*"; }
+
+check_platform() {
+   [[ $(uname -s) == Linux ]] || fail 'This script must run on Manjaro Linux.'
+   [[ -f /etc/manjaro-release ]] || fail 'This script supports Manjaro only.'
+   (( EUID != 0 )) || fail 'Run as the GNOME user, without sudo.'
+}
+
+graphical_session_exists() {
+   local session_id session_user session_type session_class
+   local sessions
+   sessions=$(loginctl list-sessions --no-legend --no-pager) || return 2
+   while read -r session_id _; do
+      [[ -n $session_id ]] || continue
+      session_user=$(loginctl show-session "$session_id" -p Name --value) || return 2
+      [[ $session_user == "$desktop_user" ]] || continue
+      session_type=$(loginctl show-session "$session_id" -p Type --value) || return 2
+      session_class=$(loginctl show-session "$session_id" -p Class --value) || return 2
+      if [[ $session_type == wayland || $session_type == x11 ]]; then
+         [[ $session_class != greeter ]] && return 0
+      fi
+   done <<< "$sessions"
+   return 1
+}
+
+ensure_certificate() {
+   local cert_name cert_tmp
+   mkdir -p "$cert_dir"
+   chmod 700 "$cert_dir"
+   [[ ! -L $tls_key && ! -L $tls_cert ]] || fail 'TLS paths must not be symlinks.'
+   if [[ -e $tls_key || -e $tls_cert ]]; then
+      [[ -s $tls_key && -s $tls_cert ]] || fail 'Incomplete TLS pair; restore it before rerunning.'
+      openssl pkey -in "$tls_key" -noout </dev/null || fail 'Cannot read existing TLS key.'
+      openssl x509 -in "$tls_cert" -checkend 0 -noout || fail 'Existing TLS certificate has expired or is invalid.'
+      [[ $(openssl pkey -in "$tls_key" -pubout </dev/null) == \
+         "$(openssl x509 -in "$tls_cert" -pubkey -noout)" ]] || fail 'TLS key and certificate do not match.'
+      chmod 600 "$tls_key"
+      return
+   fi
+   cert_name=$(hostname -f 2>/dev/null || hostname)
+   [[ $cert_name =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || cert_name=localhost
+   cert_tmp=$(mktemp -d "$cert_dir/.tls.XXXXXX")
+   # Work in a subshell so cleanup also runs on certificate-generation failure.
+   (
+      trap 'rm -f -- "$cert_tmp/key" "$cert_tmp/cert"; rmdir -- "$cert_tmp"' EXIT
+      openssl req -new -newkey rsa:4096 -nodes -x509 -days 365 \
+         -keyout "$cert_tmp/key" -out "$cert_tmp/cert" \
+         -subj "/CN=$cert_name" -addext "subjectAltName=DNS:$cert_name"
+      chmod 600 "$cert_tmp/key"
+      mv -- "$cert_tmp/key" "$tls_key"
+      mv -- "$cert_tmp/cert" "$tls_cert"
+   )
+}
+
+main() {
+   local port=3391 defer_start=0 install_packages=0 check_only=0
+   local option command_name help_text session_result
+   local desktop_user session_unit cert_dir tls_key tls_cert
+   while (( $# )); do
+      option=$1
+      case $option in
+         --port)
+            (( $# >= 2 )) || fail '--port requires a value.'
+            port=$2; shift 2 ;;
+         --defer-start) defer_start=1; shift ;;
+         --install-packages) install_packages=1; shift ;;
+         --check) check_only=1; shift ;;
+         -h|--help) usage; return ;;
+         *) fail "Unknown argument: $option" ;;
+      esac
+   done
+   [[ $port =~ ^[0-9]{1,5}$ ]] || fail 'Port must be a number from 1024 to 65535.'
+   port=$((10#$port))
+   (( port >= 1024 && port <= 65535 )) || fail 'Port must be from 1024 to 65535.'
+   (( !check_only || !install_packages )) || fail '--check cannot install packages.'
+   check_platform
+   for command_name in id systemctl loginctl sudo ss; do
+      command -v "$command_name" >/dev/null || fail "Missing command: $command_name"
+   done
+   desktop_user=$(id -un)
+   [[ $desktop_user =~ ^[a-zA-Z_][a-zA-Z0-9_-]*\$?$ ]] || fail 'Unsupported account name.'
+   session_unit="gnome-headless-session@$desktop_user.service"
+   cert_dir="$HOME/.local/share/gnome-remote-desktop"
+   tls_key="$cert_dir/headless.key"
+   tls_cert="$cert_dir/headless.crt"
+   if (( install_packages )); then
+      note 'Installing packages with a full Manjaro upgrade (pacman will ask for confirmation).'
+      sudo pacman -Syu --needed gdm gnome-shell gnome-session gnome-remote-desktop openssl
+   fi
+   for command_name in grdctl openssl; do
+      command -v "$command_name" >/dev/null || fail "Missing $command_name; rerun with --install-packages."
+   done
+   systemctl --user show-environment >/dev/null || fail 'No user systemd manager; log in directly as the target user, for example over SSH.'
+   systemctl cat gnome-headless-session@.service >/dev/null || fail 'Installed GDM does not provide gnome-headless-session@.service. Upgrade Manjaro/GNOME.'
+   systemctl --user cat gnome-remote-desktop-headless.service >/dev/null || fail 'Installed GNOME Remote Desktop lacks its headless service.'
+   systemctl is-active --quiet gdm.service || fail 'GDM is not running. Configure GDM separately before using this script.'
+   [[ $(systemctl get-default) == graphical.target ]] || fail 'Boot target is not graphical.target. Configure graphical boot separately.'
+   help_text=$(grdctl --help)
+   for option in --headless set-port set-credentials set-tls-key set-tls-cert; do
+      [[ $help_text == *"$option"* ]] || fail "Installed grdctl lacks $option; upgrade GNOME Remote Desktop."
+   done
+   if ! systemctl --user is-active --quiet gnome-remote-desktop-headless.service; then
+      [[ -z $(ss -H -ltn "sport = :$port") ]] || fail "TCP port $port is in use; select a free --port."
+   fi
+   if ! systemctl is-active --quiet "$session_unit"; then
+      session_result=0
+      graphical_session_exists || session_result=$?
+      (( session_result != 2 )) || fail 'Could not inspect login sessions.'
+      if (( session_result == 0 && !defer_start )); then
+         fail 'This user already has a graphical session. Use --defer-start, then log out and start the session over SSH.'
+      fi
+   fi
+   note "Prerequisites passed: user=$desktop_user, port=$port."
+   (( !check_only )) || return 0
+   [[ -t 0 ]] || fail 'Interactive input is required for grdctl credential entry.'
+   umask 077
+   sudo -v
+   ensure_certificate
+   grdctl --headless rdp set-tls-key "$tls_key"
+   grdctl --headless rdp set-tls-cert "$tls_cert"
+   grdctl --headless rdp set-port "$port"
+   if [[ $help_text == *disable-port-negotiation* ]]; then
+      grdctl --headless rdp disable-port-negotiation
+   fi
+   note 'Choose the RDP connection username and password at the prompts (not shell arguments).'
+   grdctl --headless rdp set-credentials
+   grdctl --headless rdp disable-view-only
+   grdctl --headless rdp enable
+   systemctl --user enable gnome-remote-desktop-headless.service
+   sudo systemctl enable "$session_unit"
+   if (( defer_start )); then
+      note "Configured. After logging out of the graphical session, connect over SSH as $desktop_user and run:"
+      printf '  systemctl --user restart gnome-remote-desktop-headless.service\n'
+      printf '  sudo systemctl start %q\n' "$session_unit"
+   else
+      systemctl --user restart gnome-remote-desktop-headless.service
+      sudo systemctl start "$session_unit"
+      # Session creation is asynchronous; allow up to 20 seconds for RDP to bind.
+      local ready=0 attempt
+      for attempt in {1..20}; do
+         if systemctl --user is-active --quiet gnome-remote-desktop-headless.service &&
+            systemctl is-active --quiet "$session_unit" &&
+            [[ -n $(ss -H -ltn "sport = :$port") ]]; then
+            ready=1; break
+         fi
+         sleep 1
+      done
+      if (( !ready )); then
+         printf 'Check: journalctl --user -u gnome-remote-desktop-headless.service -n 60\n' >&2
+         printf 'Check: sudo journalctl -u %q -n 60\n' "$session_unit" >&2
+         fail 'The headless session or RDP listener did not become ready.'
+      fi
+      note "Headless desktop is running for $desktop_user on TCP $port."
+   fi
+   note 'Use the chosen RDP credentials to connect directly to this listener.'
+   note 'Any existing port forwarding must point to this port. Firewall rules were not changed.'
+   note 'TLS uses a self-signed certificate; verify its fingerprint when connecting:'
+   openssl x509 -in "$tls_cert" -noout -fingerprint -sha256
+   note 'To stop and disable this setup:'
+   printf '  sudo systemctl disable --now %q\n' "$session_unit"
+   printf '  systemctl --user disable --now gnome-remote-desktop-headless.service\n'
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+   main "$@"
+fi
