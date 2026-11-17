@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Add the Manjaro FAT32 boot partition to fstab and mount it at /main-boot.
+set -euo pipefail
+
+uuid=0704-5EE4
+mount_point=/main-boot
+fstab=/etc/fstab
+dry_run=0
+mount_now=1
+
+usage() {
+    cat <<'HELP'
+Usage: add-main-boot [OPTIONS]
+
+Add UUID=0704-5EE4 (MANJAROBOOT) at /main-boot, back up fstab, and mount it.
+The filesystem is root-owned and writable by root (readable by other users).
+Existing entries are checked before any changes. Run normally; sudo is used
+when needed. No formatting, bootloader installation, or unmounting is done.
+
+  --dry-run           Show the proposed entry without changing anything
+  --no-mount          Update fstab and create the mount point without mounting
+  --uuid UUID         Use another existing FAT32 filesystem
+  --mount-point PATH  Use another absolute mount point
+  --fstab FILE        Update another fstab (use --no-mount for an offline file)
+  -h, --help          Show this help
+HELP
+}
+fail() { printf 'add-main-boot: %s\n' "$*" >&2; exit 1; }
+original_args=("$@")
+while (($#)); do
+    case $1 in
+        --dry-run) dry_run=1; shift ;;
+        --no-mount) mount_now=0; shift ;;
+        --uuid|--mount-point|--fstab)
+            (($# >= 2)) || fail "Missing value for $1"
+            case $1 in
+                --uuid) uuid=$2 ;;
+                --mount-point) mount_point=$2 ;;
+                --fstab) fstab=$2 ;;
+            esac
+            shift 2 ;;
+        -h|--help) usage; exit 0 ;;
+        *) fail "Unknown option: $1 (see --help)" ;;
+    esac
+done
+[[ $uuid =~ ^[[:xdigit:]]{4}-[[:xdigit:]]{4}$ ]] || fail 'Expected a FAT UUID such as 0704-5EE4'
+[[ $mount_point == /* ]] || fail 'The mount point must be absolute'
+mount_point=$(readlink -m -- "$mount_point")
+[[ $mount_point != / && $mount_point != /boot && $mount_point != /boot/efi ]] || fail 'Use a separate mount point, such as /main-boot'
+[[ $mount_point != *[[:space:]\\]* ]] || fail 'Mount points containing whitespace or backslashes are not supported'
+mount_point=${mount_point%/}
+[[ -f $fstab ]] || fail "Not a regular fstab file: $fstab"
+fstab=$(readlink -f -- "$fstab")
+
+if (( !dry_run && EUID != 0 )) && { [[ $fstab == /etc/fstab ]] || (( mount_now )); }; then
+    exec sudo -- "$0" "${original_args[@]}"
+fi
+
+# Device names can change across boots; resolve the UUID on every invocation.
+device=$(lsblk -rpn -o NAME,UUID | awk -v uuid="$uuid" 'tolower($2) == tolower(uuid) { print $1 }')
+[[ -n $device && $device != *$'\n'* ]] || fail "Expected exactly one device with UUID=$uuid"
+read -r fs_type fs_version < <(lsblk -dnro FSTYPE,FSVER -- "$device")
+[[ $fs_type == vfat && $fs_version == FAT32 ]] || fail "$device is not a FAT32 filesystem ($fs_type $fs_version)"
+
+state=$(awk -v source="UUID=$uuid" -v device="$device" -v target="$mount_point" '
+    /^[[:space:]]*#/ || NF == 0 { next }
+    {
+        matches = tolower($1) == tolower(source) || $1 == device
+        if ($2 == target) {
+            if (matches && $3 == "vfat") same++; else conflict++
+        } else if (matches) conflict++
+    }
+    END { if (conflict || same > 1) print "conflict"; else if (same) print "present"; else print "absent" }
+' "$fstab")
+[[ $state != conflict ]] || fail "Conflicting mount point or partition entry in $fstab; no changes made"
+
+if actual_uuid=$(findmnt -rn --mountpoint "$mount_point" -o UUID); then
+    [[ ${actual_uuid,,} == ${uuid,,} ]] || fail "$mount_point already mounts another filesystem"
+fi
+existing_target=$(findmnt -rn --source "UUID=$uuid" -o TARGET || true)
+[[ -z $existing_target || $existing_target == "$mount_point" ]] || fail "$device is already mounted at $existing_target; unmount it before running this script"
+
+entry="UUID=$uuid $mount_point vfat defaults,rw,nofail,uid=0,gid=0,umask=022 0 2"
+printf 'Device: %s (FAT32)\nFstab: %s\nEntry: %s\n' "$device" "$fstab" "$entry"
+if (( dry_run )); then
+    printf 'Dry run: entry is %s; no files changed or filesystems mounted.\n' "$state"
+    exit 0
+fi
+
+mkdir -p -- "$mount_point"
+if [[ $state == absent ]]; then
+    temporary=$(mktemp "$(dirname -- "$fstab")/.fstab.add-main-boot.XXXXXX")
+    trap 'rm -f -- "$temporary"' EXIT
+    cp --preserve=all -- "$fstab" "$temporary"
+    # The existing fstab may not end in a newline.
+    printf '\n# Manjaro FAT32 boot partition\n%s\n' "$entry" >> "$temporary"
+    findmnt --verify --tab-file "$temporary" || fail 'fstab validation failed; original file kept'
+    backup="${fstab}.bak.$(date +%Y%m%d-%H%M%S).$$"
+    cp --preserve=all -- "$fstab" "$backup"
+    mv -- "$temporary" "$fstab"
+    trap - EXIT
+    printf 'Backup: %s\n' "$backup"
+    if [[ $fstab == /etc/fstab && -d /run/systemd/system ]]; then
+        systemctl daemon-reload
+    fi
+else
+    printf 'The matching fstab entry already exists.\n'
+fi
+
+if (( mount_now )); then
+    if ! findmnt -rn --mountpoint "$mount_point" >/dev/null; then
+        mount --fstab "$fstab" --target "$mount_point"
+    fi
+    findmnt --mountpoint "$mount_point" -o SOURCE,TARGET,FSTYPE,OPTIONS
+else
+    printf 'fstab configured; mounting was skipped.\n'
+fi
