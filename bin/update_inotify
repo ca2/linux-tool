@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$(uname -s)" != "Linux" ]; then
+   echo "update_inotify: skipping (not Linux: $(uname -s))"
+   exit 0
+fi
+
+TARGET_WATCHES="${INOTIFY_MAX_USER_WATCHES:-524288}"
+TARGET_INSTANCES="${INOTIFY_MAX_USER_INSTANCES:-1024}"
+TARGET_EVENTS="${INOTIFY_MAX_QUEUED_EVENTS:-32768}"
+CONF_FILE="/etc/sysctl.d/99-inotify.conf"
+
+PROC_DIR="/proc/sys/fs/inotify"
+if [ ! -d "$PROC_DIR" ]; then
+   echo "update_inotify: $PROC_DIR not found; inotify sysctl not available." >&2
+   exit 1
+fi
+
+cur_watches="$(cat "$PROC_DIR/max_user_watches")"
+cur_instances="$(cat "$PROC_DIR/max_user_instances")"
+cur_events="$(cat "$PROC_DIR/max_queued_events")"
+
+max_int() {
+   if [ "$1" -ge "$2" ]; then
+      echo "$1"
+   else
+      echo "$2"
+   fi
+}
+
+want_watches="$(max_int "$cur_watches" "$TARGET_WATCHES")"
+want_instances="$(max_int "$cur_instances" "$TARGET_INSTANCES")"
+want_events="$(max_int "$cur_events" "$TARGET_EVENTS")"
+
+conf_has_at_least() {
+   local key="$1"
+   local min_val="$2"
+   local val=""
+   if [ -r "$CONF_FILE" ]; then
+      val="$(awk -F= -v k="$key" '
+         /^[[:space:]]*#/ { next }
+         {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+            if ($1 == k) v = $2
+         }
+         END { print v }
+      ' "$CONF_FILE")"
+   fi
+   [ -n "$val" ] && [ "$val" -ge "$min_val" ] 2>/dev/null
+}
+
+live_ok=0
+if [ "$cur_watches" -ge "$TARGET_WATCHES" ] && \
+   [ "$cur_instances" -ge "$TARGET_INSTANCES" ] && \
+   [ "$cur_events" -ge "$TARGET_EVENTS" ]; then
+   live_ok=1
+fi
+
+conf_ok=0
+if conf_has_at_least "fs.inotify.max_user_watches" "$TARGET_WATCHES" && \
+   conf_has_at_least "fs.inotify.max_user_instances" "$TARGET_INSTANCES" && \
+   conf_has_at_least "fs.inotify.max_queued_events" "$TARGET_EVENTS"; then
+   conf_ok=1
+fi
+
+if [ "$live_ok" -eq 1 ] && [ "$conf_ok" -eq 1 ]; then
+   echo "inotify limits already configured:"
+   echo "  fs.inotify.max_user_watches   = $cur_watches"
+   echo "  fs.inotify.max_user_instances = $cur_instances"
+   echo "  fs.inotify.max_queued_events  = $cur_events"
+   exit 0
+fi
+
+SUDO=""
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+   if command -v sudo >/dev/null 2>&1; then
+      SUDO="sudo"
+   else
+      echo "update_inotify: root privileges required (sudo not found)." >&2
+      exit 1
+   fi
+fi
+
+echo "Updating inotify limits in $CONF_FILE..."
+$SUDO mkdir -p /etc/sysctl.d
+$SUDO tee "$CONF_FILE" >/dev/null <<EOF
+# Managed by update_inotify
+fs.inotify.max_user_watches=$want_watches
+fs.inotify.max_user_instances=$want_instances
+fs.inotify.max_queued_events=$want_events
+EOF
+$SUDO chmod 644 "$CONF_FILE"
+
+SYSCTL_BIN="sysctl"
+if ! command -v sysctl >/dev/null 2>&1; then
+   for p in /usr/sbin/sysctl /sbin/sysctl; do
+      if [ -x "$p" ]; then
+         SYSCTL_BIN="$p"
+         break
+      fi
+   done
+fi
+
+$SUDO "$SYSCTL_BIN" -p "$CONF_FILE"
+
+echo "Current inotify limits:"
+echo "  fs.inotify.max_user_watches   = $(cat "$PROC_DIR/max_user_watches")"
+echo "  fs.inotify.max_user_instances = $(cat "$PROC_DIR/max_user_instances")"
+echo "  fs.inotify.max_queued_events  = $(cat "$PROC_DIR/max_queued_events")"
