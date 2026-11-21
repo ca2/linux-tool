@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Antigravity
+GenericName=Agentic Development Platform
+Comment=Antigravity - Agentic Desktop Application
+Exec="@EXEC_PATH@" %U
+Icon=@ICON_PATH@
+Terminal=false
+Categories=Development;IDE;
+Keywords=ai;agent;google;antigravity;coding;development;
+StartupNotify=true
+StartupWMClass=antigravity
+MimeType=x-scheme-handler/antigravity;

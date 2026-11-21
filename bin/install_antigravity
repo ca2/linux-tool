@@ -1,0 +1,326 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Download and install Google Antigravity into ~/application_opt/Antigravity
+# along with its desktop launcher and icon.
+# Resources live in the sibling tool/image and tool/_matter directories.
+
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1; then
+    SCRIPT_PATH="$(readlink -f "${SCRIPT_PATH}")"
+fi
+SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)"
+TOOL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+INSTALL_BASE="${HOME}/application_opt"
+INSTALL_DIR="${INSTALL_BASE}/Antigravity"
+BINARY_PATH="${INSTALL_DIR}/antigravity"
+
+IMAGE_ICON_SRC="${TOOL_DIR}/image/antigravity.png"
+DESKTOP_TEMPLATE_SRC="${TOOL_DIR}/_matter/antigravity.desktop"
+
+ICON_DIR="${HOME}/.local/share/icons/hicolor/512x512/apps"
+ICON_DEST="${ICON_DIR}/antigravity.png"
+DESKTOP_DIR="${HOME}/.local/share/applications"
+DESKTOP_DEST="${DESKTOP_DIR}/antigravity.desktop"
+
+DOWNLOAD_PAGE_URL="https://antigravity.google/download"
+
+FORCE=0
+DESKTOP_ONLY=0
+PRINT_URL=0
+CUSTOM_URL=""
+LOCAL_ARCHIVE=""
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Download and install Google Antigravity into:
+  ${INSTALL_DIR}
+and install its desktop launcher and icon into:
+  ${DESKTOP_DEST}
+  ${ICON_DEST}
+
+If ${BINARY_PATH} is already present, downloading is skipped and only
+the desktop launcher and icon are installed/updated (unless --force is used).
+
+Options:
+  --force, --update    Re-download and replace an existing installation
+  --desktop-only       Only install/update the desktop launcher and icon
+  --archive <file>     Install from a local Antigravity .tar.gz archive
+  --url <url>          Download from a specific archive URL instead of auto-detecting
+  --print-url          Resolve and print the download URL for this host and exit
+  -h, --help           Show this help message
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --force|--update)
+            FORCE=1
+            shift
+            ;;
+        --desktop-only)
+            DESKTOP_ONLY=1
+            shift
+            ;;
+        --print-url)
+            PRINT_URL=1
+            shift
+            ;;
+        --archive)
+            [[ $# -ge 2 ]] || { echo "Error: --archive requires a file path" >&2; exit 1; }
+            LOCAL_ARCHIVE="$2"
+            shift 2
+            ;;
+        --url)
+            [[ $# -ge 2 ]] || { echo "Error: --url requires a URL" >&2; exit 1; }
+            CUSTOM_URL="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Error: Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+detect_arch_slug() {
+    local os arch
+    os="$(uname -s)"
+    if [[ "${os}" != "Linux" ]]; then
+        echo "Error: Unsupported OS '${os}' (expected Linux)." >&2
+        exit 1
+    fi
+
+    arch="$(uname -m)"
+    case "${arch}" in
+        x86_64|amd64)
+            echo "linux-x64"
+            ;;
+        aarch64|arm64)
+            echo "linux-arm"
+            ;;
+        *)
+            echo "Error: Unsupported Linux architecture '${arch}' (supported: x86_64, aarch64/arm64)." >&2
+            exit 1
+            ;;
+    esac
+}
+
+fetch_text() {
+    local url="$1"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL -A "Mozilla/5.0" "${url}"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO- -U "Mozilla/5.0" "${url}"
+    else
+        echo "Error: Neither 'curl' nor 'wget' is available." >&2
+        exit 1
+    fi
+}
+
+download_file() {
+    local url="$1"
+    local dest="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --progress-bar -o "${dest}" "${url}"
+    elif command -v wget >/dev/null 2>&1; then
+        wget --show-progress -O "${dest}" "${url}"
+    else
+        echo "Error: Neither 'curl' nor 'wget' is available." >&2
+        exit 1
+    fi
+}
+
+resolve_download_url() {
+    local arch_slug="$1"
+    local page url
+    page="$(fetch_text "${DOWNLOAD_PAGE_URL}")"
+    url="$(printf '%s\n' "${page}" \
+        | grep -oE "https://storage\.googleapis\.com/antigravity-public/antigravity-hub/[^\"'<>[:space:]]+/${arch_slug}/Antigravity\.tar\.gz" \
+        | head -n 1 || true)"
+    if [[ -z "${url}" ]]; then
+        echo "Error: Could not resolve Antigravity download URL for '${arch_slug}' from ${DOWNLOAD_PAGE_URL}." >&2
+        exit 1
+    fi
+    printf '%s\n' "${url}"
+}
+
+extract_icon_from_asar() {
+    local asar_path="$1"
+    local out_path="$2"
+    command -v python3 >/dev/null 2>&1 || return 1
+    [[ -f "${asar_path}" ]] || return 1
+
+    python3 - "${asar_path}" "${out_path}" <<'PY'
+import json, struct, sys
+
+asar_path, out_path = sys.argv[1], sys.argv[2]
+with open(asar_path, "rb") as f:
+    f.seek(4)
+    total_header = struct.unpack("<I", f.read(4))[0]
+    f.seek(12)
+    hsize = struct.unpack("<I", f.read(4))[0]
+    header = json.loads(f.read(hsize).decode("utf-8"))
+    ico = header.get("files", {}).get("icon.png")
+    if not ico:
+        sys.exit(1)
+    f.seek(8 + total_header + int(ico["offset"]))
+    data = f.read(int(ico["size"]))
+with open(out_path, "wb") as out:
+    out.write(data)
+PY
+}
+
+install_archive() {
+    local archive_path="$1"
+    local tmp_extract="$2"
+
+    echo "Extracting $(basename "${archive_path}")..."
+    tar -xzf "${archive_path}" -C "${tmp_extract}"
+
+    local found_bin extracted_dir
+    found_bin="$(find "${tmp_extract}" -maxdepth 3 -type f -name "antigravity" | head -n 1 || true)"
+    if [[ -z "${found_bin}" ]]; then
+        echo "Error: Could not find 'antigravity' binary inside extracted archive." >&2
+        exit 1
+    fi
+    extracted_dir="$(dirname "${found_bin}")"
+
+    mkdir -p "${INSTALL_BASE}"
+
+    local backup_dir=""
+    if [[ -e "${INSTALL_DIR}" ]]; then
+        backup_dir="${INSTALL_DIR}.bak.$$"
+        mv "${INSTALL_DIR}" "${backup_dir}"
+    fi
+
+    if mv "${extracted_dir}" "${INSTALL_DIR}"; then
+        chmod +x "${BINARY_PATH}"
+        if [[ -n "${backup_dir}" && -e "${backup_dir}" ]]; then
+            rm -rf "${backup_dir}"
+        fi
+    else
+        if [[ -n "${backup_dir}" && -e "${backup_dir}" ]]; then
+            mv "${backup_dir}" "${INSTALL_DIR}"
+        fi
+        echo "Error: Failed to install Antigravity into ${INSTALL_DIR}." >&2
+        exit 1
+    fi
+
+    echo "Installed Antigravity into ${INSTALL_DIR}"
+}
+
+install_icon() {
+    mkdir -p "${ICON_DIR}"
+    if [[ -f "${IMAGE_ICON_SRC}" ]]; then
+        cp -f "${IMAGE_ICON_SRC}" "${ICON_DEST}"
+        chmod 644 "${ICON_DEST}"
+        echo "Installed icon from ${IMAGE_ICON_SRC} -> ${ICON_DEST}"
+    elif extract_icon_from_asar "${INSTALL_DIR}/resources/app.asar" "${ICON_DEST}"; then
+        chmod 644 "${ICON_DEST}"
+        echo "Extracted icon from app.asar -> ${ICON_DEST}"
+    else
+        echo "Warning: Icon not found at ${IMAGE_ICON_SRC} and could not be extracted from app.asar." >&2
+        return 1
+    fi
+}
+
+install_desktop_entry() {
+    mkdir -p "${DESKTOP_DIR}"
+
+    if [[ -f "${DESKTOP_TEMPLATE_SRC}" ]]; then
+        sed \
+            -e "s|@EXEC_PATH@|${BINARY_PATH}|g" \
+            -e "s|@ICON_PATH@|${ICON_DEST}|g" \
+            "${DESKTOP_TEMPLATE_SRC}" > "${DESKTOP_DEST}"
+        echo "Installed desktop launcher from ${DESKTOP_TEMPLATE_SRC} -> ${DESKTOP_DEST}"
+    else
+        cat > "${DESKTOP_DEST}" <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Antigravity
+GenericName=Agentic Development Platform
+Comment=Antigravity - Agentic Desktop Application
+Exec="${BINARY_PATH}" %U
+Icon=${ICON_DEST}
+Terminal=false
+Categories=Development;IDE;
+Keywords=ai;agent;google;antigravity;coding;development;
+StartupNotify=true
+StartupWMClass=antigravity
+MimeType=x-scheme-handler/antigravity;
+EOF
+        echo "Generated desktop launcher -> ${DESKTOP_DEST}"
+    fi
+
+    chmod 644 "${DESKTOP_DEST}"
+
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "${DESKTOP_DIR}" 2>/dev/null || true
+    fi
+
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -f -t -q "${HOME}/.local/share/icons/hicolor" 2>/dev/null || true
+    fi
+}
+
+main() {
+    if [[ "${PRINT_URL}" -eq 1 ]]; then
+        local arch_slug url
+        arch_slug="$(detect_arch_slug)"
+        url="${CUSTOM_URL:-$(resolve_download_url "${arch_slug}")}"
+        printf '%s\n' "${url}"
+        exit 0
+    fi
+
+    if [[ "${DESKTOP_ONLY}" -eq 1 ]]; then
+        if [[ ! -f "${BINARY_PATH}" ]]; then
+            echo "Error: ${BINARY_PATH} does not exist. Run without --desktop-only to download Antigravity." >&2
+            exit 1
+        fi
+        chmod +x "${BINARY_PATH}"
+    elif [[ -f "${BINARY_PATH}" && "${FORCE}" -eq 0 && -z "${LOCAL_ARCHIVE}" ]]; then
+        echo "Antigravity is already present at ${BINARY_PATH}; skipping download."
+        chmod +x "${BINARY_PATH}"
+    else
+        TMP_DIR="$(mktemp -d)"
+        trap 'rm -rf "${TMP_DIR}"' EXIT
+
+        local archive_to_install=""
+        if [[ -n "${LOCAL_ARCHIVE}" ]]; then
+            if [[ ! -f "${LOCAL_ARCHIVE}" ]]; then
+                echo "Error: Archive not found: ${LOCAL_ARCHIVE}" >&2
+                exit 1
+            fi
+            archive_to_install="${LOCAL_ARCHIVE}"
+        else
+            local arch_slug download_url
+            arch_slug="$(detect_arch_slug)"
+            download_url="${CUSTOM_URL:-$(resolve_download_url "${arch_slug}")}"
+            echo "Detected host target: ${arch_slug}"
+            echo "Downloading Antigravity from ${download_url}..."
+            archive_to_install="${TMP_DIR}/Antigravity.tar.gz"
+            download_file "${download_url}" "${archive_to_install}"
+        fi
+
+        local extract_dir="${TMP_DIR}/extract"
+        mkdir -p "${extract_dir}"
+        install_archive "${archive_to_install}" "${extract_dir}"
+    fi
+
+    install_icon
+    install_desktop_entry
+
+    echo "Done."
+}
+
+main
