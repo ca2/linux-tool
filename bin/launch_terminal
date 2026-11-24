@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 
+bin=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || exit 1
+
 directory=${1:-.}
 if (( $# )); then
     shift
 fi
 cd -- "$directory" || exit 1
 directory=$PWD
-if (( ! $# )); then
-    set -- bash -i
+if (( ! $# )) || [[ $1 == --git-checkout ]]; then
+    set -- bash --rcfile "$bin/workspace_terminal_rc" -i -s -- "$@"
+else
+    set -- bash "$bin/workspace_terminal_rc" "$@"
 fi
 
 case ":${XDG_CURRENT_DESKTOP,,}:" in

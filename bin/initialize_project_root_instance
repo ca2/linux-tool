@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+
+exec "$(dirname -- "$0")/application_build_helper" --initialize-project-root-instance "$@"

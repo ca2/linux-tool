@@ -2,22 +2,35 @@
 
 bin=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || exit 1
 
-case ${1:-} in
-    --shell|--create-shortcut-executables)
-        if (( $# != 1 )); then
-            printf 'Usage: application_build_helper %s\n' "$1" >&2
+option=${1:-}
+case $option in
+    --shell|--create-shortcut-executables|--initialize-project-root|--initialize-project-root-instance)
+        shift
+        checkout=
+        case $# in
+            0)
+                # Walk up through nested submodules to the project checkout.
+                if ! checkout=$(git rev-parse --show-toplevel 2>/dev/null); then
+                    printf '%s\n' 'Run from a project checkout or supply --root CHECKOUT.' >&2
+                    exit 1
+                fi
+                while parent=$(git -C "$checkout" rev-parse --show-superproject-working-tree 2>/dev/null) &&
+                      [[ -n $parent ]]; do
+                    checkout=$parent
+                done
+                ;;
+            1) checkout=$1 ;;
+            2) [[ $1 == --root ]] && checkout=$2 ;;
+        esac
+        if [[ -z ${checkout:-} || $checkout == --* ]]; then
+            printf 'Usage: application_build_helper %s [CHECKOUT | --root CHECKOUT]\n' "$option" >&2
             exit 2
         fi
-
-        # Find the workspace from its root or from any of its Git submodules.
-        checkout=$(git rev-parse --show-toplevel 2>/dev/null) || checkout=
-        while [[ -n $checkout ]] &&
-              parent=$(git -C "$checkout" rev-parse --show-superproject-working-tree 2>/dev/null) &&
-              [[ -n $parent ]]; do
-            checkout=$parent
-        done
-        if [[ -z $checkout || ! -x "$checkout/tool/shell" ]]; then
-            printf '%s\n' 'Run this command from a workspace containing tool/shell.' >&2
+        checkout=$(cd -- "$checkout" && pwd -P) || exit 1
+        project_tool="$checkout/operating_system/operating_system-linux/tool"
+        if [[ $(git -C "$checkout" rev-parse --show-toplevel 2>/dev/null) != "$checkout" ||
+              ! -x "$project_tool/bin/application_build_helper" || ! -f "$project_tool/shell" ]]; then
+            printf 'Expected a Git checkout with the Linux tools initialized: %s\n' "$checkout" >&2
             exit 1
         fi
         ;;
@@ -27,8 +40,27 @@ case ${1:-} in
         ;;
 esac
 
-if [[ $1 == --shell ]]; then
-    exec "$bin/launch_terminal" "$checkout" bash "$checkout/tool/shell"
+if [[ $option == --initialize-project-root ]]; then
+    template="$bin/../project_root/shell"
+    mkdir -p -- "$checkout/tool" || exit 1
+    if [[ ! -x "$checkout/tool/shell" ]] || ! cmp -s -- "$template" "$checkout/tool/shell"; then
+        install -m 755 -- "$template" "$checkout/tool/shell" || exit 1
+    fi
+    for rule in /shell.desktop /.project-root-instance/; do
+        if ! grep -Fxq -- "$rule" "$checkout/.gitignore" 2>/dev/null; then
+            printf '\n%s\n' "$rule" >> "$checkout/.gitignore" || exit 1
+        fi
+    done
+    exit 0
+fi
+
+if [[ ! -x "$checkout/tool/shell" ]]; then
+    printf 'Missing executable %s. Run initialize_project_root first.\n' "$checkout/tool/shell" >&2
+    exit 1
+fi
+
+if [[ $option == --shell ]]; then
+    exec "$bin/launch_terminal" "$checkout"
 fi
 
 # Exec resolves the workspace helper relative to the desktop entry working directory.
@@ -38,7 +70,7 @@ desktop_path=${desktop_path//$'\r'/\\r}
 desktop_path=${desktop_path//$'\n'/\\n}
 shortcut="$checkout/shell.desktop"
 temporary=$(mktemp -- "$checkout/.shell.desktop.XXXXXXXX") || exit 1
-trap 'rm -f -- "$temporary"' EXIT
+trap 'rm -f -- "$temporary" "${marker_temporary:-}"' EXIT
 cat > "$temporary" <<DESKTOP || exit 1
 [Desktop Entry]
 Type=Application
@@ -50,4 +82,15 @@ Terminal=false
 DESKTOP
 chmod u+x -- "$temporary" || exit 1
 mv -fT -- "$temporary" "$shortcut" || exit 1
+if [[ $option == --initialize-project-root-instance ]]; then
+    state="$checkout/.project-root-instance"
+    if [[ -L $state ]]; then
+        printf 'Instance state directory must be inside the checkout: %s\n' "$state" >&2
+        exit 1
+    fi
+    mkdir -p -- "$state" || exit 1
+    marker_temporary=$(mktemp -- "$state/.initialized-root.XXXXXXXX") || exit 1
+    printf '1:%s\n' "$checkout" > "$marker_temporary" || exit 1
+    mv -fT -- "$marker_temporary" "$state/initialized-root.txt" || exit 1
+fi
 printf '%s\n' "$shortcut"

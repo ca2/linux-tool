@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+
+ca2_run_workspace_shell() {
+    unset -f ca2_run_workspace_shell
+    local checkout shell_script initializer initialized_root
+    checkout=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P) || return 1
+    shell_script="$checkout/operating_system/operating_system-linux/tool/shell"
+    if [[ ! -f "$shell_script" ]]; then
+        printf '%s\n' 'The Linux tool submodule is missing. Run git submodule update --init --recursive.' >&2
+        return 1
+    fi
+
+    initializer="${shell_script%/*}/bin/initialize_project_root_instance"
+    initialized_root=
+    if [[ -f "$checkout/.project-root-instance/initialized-root.txt" ]]; then
+        IFS= read -r initialized_root < "$checkout/.project-root-instance/initialized-root.txt" || initialized_root=
+    fi
+    if [[ $initialized_root != "1:$checkout" || ! -x "$checkout/shell.desktop" ]]; then
+        "$initializer" --root "$checkout" >/dev/null || return
+    fi
+
+    if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
+        . "$shell_script"
+    else
+        cd -- "$checkout" || return 1
+        exec bash "$shell_script"
+    fi
+}
+
+ca2_run_workspace_shell

@@ -3,7 +3,7 @@
 ca2_run_linux_tool_shell() {
     unset -f ca2_run_linux_tool_shell
     local tool_dir architecture tool_path
-    tool_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || return 1
+    tool_dir=$(cd -- "${CA2_LINUX_TOOL_DIR:-$(dirname -- "${BASH_SOURCE[0]}")}" && pwd -P) || return 1
     architecture=$(uname -m) || return 1
 
     if [[ -r "$HOME/application/integration/code/.operating_system_summary" ]]; then

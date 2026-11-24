@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+
+workspace_shell=$PWD/tool/shell
+workspace_linux_tool=$PWD/operating_system/operating_system-linux/tool
+
+if [[ ${BASH_SOURCE[0]} != "$0" && -r "$HOME/.bashrc" ]]; then
+    . "$HOME/.bashrc"
+fi
+
+if [[ -f "$workspace_shell" ]]; then
+    . "$workspace_shell" || exit "$?"
+elif [[ -d "$workspace_linux_tool/bin" ]]; then
+    # Older Linux checkouts have the tool submodule without a root tool/shell.
+    CA2_LINUX_TOOL_DIR="$workspace_linux_tool" . "${BASH_SOURCE[0]%/*}/../shell" || exit "$?"
+fi
+unset workspace_shell workspace_linux_tool
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    exec "$@"
+fi
+
+if [[ ${1:-} == --git-checkout ]]; then
+    shift
+    if command -v application_build_helper >/dev/null; then
+        application_build_helper --git-checkout
+    else
+        "${BASH_SOURCE[0]%/*}/application_build_helper" --git-checkout
+    fi
+fi
