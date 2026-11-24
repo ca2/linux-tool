@@ -1,3 +1,4 @@
+package_source=rpm-fusion
 gcc-c++
 cmake
 ninja-build
