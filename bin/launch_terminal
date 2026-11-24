@@ -1,33 +1,18 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
 
-launch()
-{
-
-cd $1
-
-
-if [[ "$XDG_CURRENT_DESKTOP" == "KDE" ]]; then
-
-/usr/bin/konsole -e bash -c "exec bash"
-
-elif [[ "$XDG_CURRENT_DESKTOP" == "XFCE" ]]; then
-
-/usr/bin/xfce4-terminal  -e "bash -lc 'exec bash'"
-
-elif [[ "$XDG_CURRENT_DESKTOP" == *"LXQt"* ]]; then
-
-/usr/bin/qterminal -e bash -c "exec bash"
-
-else
-
-/usr/bin/gnome-terminal -- bash -c "exec bash"
-
+directory=${1:-.}
+if (( $# )); then
+    shift
+fi
+cd -- "$directory" || exit 1
+directory=$PWD
+if (( ! $# )); then
+    set -- bash -i
 fi
 
-
-}
-
-
-launch $1
-
-
+case ":${XDG_CURRENT_DESKTOP,,}:" in
+    *:kde:*)  exec konsole --workdir "$directory" -e "$@" ;;
+    *:xfce:*) exec xfce4-terminal --working-directory="$directory" -x "$@" ;;
+    *:lxqt:*) exec qterminal -w "$directory" -e "$@" ;;
+    *)        exec gnome-terminal --working-directory="$directory" -- "$@" ;;
+esac

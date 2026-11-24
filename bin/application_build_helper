@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+
+bin=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || exit 1
+
+case ${1:-} in
+    --shell|--create-shortcut-executables)
+        if (( $# != 1 )); then
+            printf 'Usage: application_build_helper %s\n' "$1" >&2
+            exit 2
+        fi
+
+        # Find the workspace from its root or from any of its Git submodules.
+        checkout=$(git rev-parse --show-toplevel 2>/dev/null) || checkout=
+        while [[ -n $checkout ]] &&
+              parent=$(git -C "$checkout" rev-parse --show-superproject-working-tree 2>/dev/null) &&
+              [[ -n $parent ]]; do
+            checkout=$parent
+        done
+        if [[ -z $checkout || ! -x "$checkout/tool/shell" ]]; then
+            printf '%s\n' 'Run this command from a workspace containing tool/shell.' >&2
+            exit 1
+        fi
+        ;;
+    *)
+        architecture=$(uname -m) || exit 1
+        exec "$bin/$architecture/application_build_helper" "$@"
+        ;;
+esac
+
+if [[ $1 == --shell ]]; then
+    exec "$bin/launch_terminal" "$checkout" bash "$checkout/tool/shell"
+fi
+
+# Exec resolves the workspace helper relative to the desktop entry working directory.
+desktop_path=${checkout//\\/\\\\}
+desktop_path=${desktop_path//$'\t'/\\t}
+desktop_path=${desktop_path//$'\r'/\\r}
+desktop_path=${desktop_path//$'\n'/\\n}
+shortcut="$checkout/shell.desktop"
+temporary=$(mktemp -- "$checkout/.shell.desktop.XXXXXXXX") || exit 1
+trap 'rm -f -- "$temporary"' EXIT
+cat > "$temporary" <<DESKTOP || exit 1
+[Desktop Entry]
+Type=Application
+Name=Workspace Shell
+Icon=utilities-terminal
+Exec=/usr/bin/env ./operating_system/operating_system-linux/tool/bin/application_build_helper --shell
+Path=$desktop_path
+Terminal=false
+DESKTOP
+chmod u+x -- "$temporary" || exit 1
+mv -fT -- "$temporary" "$shortcut" || exit 1
+printf '%s\n' "$shortcut"

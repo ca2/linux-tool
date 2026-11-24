@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+
+ca2_run_linux_tool_shell() {
+    unset -f ca2_run_linux_tool_shell
+    local tool_dir architecture tool_path
+    tool_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || return 1
+    architecture=$(uname -m) || return 1
+
+    if [[ -r "$HOME/application/integration/code/.operating_system_summary" ]]; then
+        . "$tool_dir/bin/_environment" || return 1
+        export __SYSTEM_UNDERSCORE_OPERATING_SYSTEM __SYSTEM_SLASHED_OPERATING_SYSTEM
+    fi
+
+    tool_path="$tool_dir/bin:$tool_dir/bin/$architecture:$tool_dir/posix/bin"
+    if [[ ${PATH:-} != "$tool_path" && ${PATH:-} != "$tool_path:"* ]]; then
+        export PATH="$tool_path${PATH:+:$PATH}"
+    fi
+
+    if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+        exec bash -i
+    fi
+}
+
+ca2_run_linux_tool_shell
