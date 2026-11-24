@@ -1,8 +1,43 @@
 #!/usr/bin/env bash
 
+ca2_defer_ssh_agent() {
+    unset -f ca2_defer_ssh_agent
+    local identity="$HOME/.ssh/id_auth"
+    local cache_dir="${XDG_RUNTIME_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}}/ca2-ssh-agent"
+    local agent_environment
 
-eval $(ssh-agent -s) > /dev/null
-ssh-add ~/.ssh/id_auth > /dev/null
+    if ssh-add -l >/dev/null 2>&1 || [[ ! -f "$identity" ]]; then
+        return 0
+    fi
 
+    agent_environment=$(
+        umask 077
+        mkdir -p -- "$cache_dir" || exit 1
+        exec 9>"$cache_dir/lock" || exit 1
+        flock -x 9 || exit 1
 
+        if [[ -r "$cache_dir/environment" ]] &&
+            { IFS= read -r SSH_AUTH_SOCK && IFS= read -r SSH_AGENT_PID; } < "$cache_dir/environment" &&
+            [[ $SSH_AGENT_PID =~ ^[0-9]+$ ]] &&
+            SSH_AUTH_SOCK="$SSH_AUTH_SOCK" ssh-add -l >/dev/null 2>&1; then
+            printf '%s\n' "$SSH_AUTH_SOCK" "$SSH_AGENT_PID"
+            exit 0
+        fi
 
+        local agent_output
+        agent_output=$(ssh-agent -s 9>&-) || exit 1
+        eval "$agent_output" >/dev/null || exit 1
+        if ! ssh-add "$identity" >/dev/null ||
+            ! printf '%s\n' "$SSH_AUTH_SOCK" "$SSH_AGENT_PID" > "$cache_dir/environment"; then
+            ssh-agent -k >/dev/null
+            exit 1
+        fi
+        printf '%s\n' "$SSH_AUTH_SOCK" "$SSH_AGENT_PID"
+    ) || return 1
+
+    SSH_AUTH_SOCK=${agent_environment%$'\n'*}
+    SSH_AGENT_PID=${agent_environment##*$'\n'}
+    export SSH_AUTH_SOCK SSH_AGENT_PID
+}
+
+ca2_defer_ssh_agent

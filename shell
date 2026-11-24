@@ -16,6 +16,10 @@ ca2_run_linux_tool_shell() {
         export PATH="$tool_path${PATH:+:$PATH}"
     fi
 
+    if ! . "$tool_dir/bin/defer_ssh_agent"; then
+        printf '%s\n' 'Could not initialize the fallback SSH agent.' >&2
+    fi
+
     if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
         exec bash -i
     fi
