@@ -1,0 +1,4 @@
+#!/bin/sh
+
+tool_bin=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd) || exit 1
+exec "$tool_bin/application_build_helper" --tailscale-hostname-to-cloudflare-subdomain "$@"
