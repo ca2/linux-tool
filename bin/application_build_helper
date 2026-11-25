@@ -50,7 +50,7 @@ if [[ $option == --initialize-project-root ]]; then
     if [[ ! -x "$checkout/tool/shell" ]] || ! cmp -s -- "$template" "$checkout/tool/shell"; then
         install -m 755 -- "$template" "$checkout/tool/shell" || exit 1
     fi
-    for rule in /shell.desktop /.project-root-instance/; do
+    for rule in /shell.desktop /.project-root-instance/ /_project_root_instance/; do
         if ! grep -Fxq -- "$rule" "$checkout/.gitignore" 2>/dev/null; then
             printf '\n%s\n' "$rule" >> "$checkout/.gitignore" || exit 1
         fi
@@ -65,6 +65,16 @@ fi
 
 if [[ $option == --shell ]]; then
     exec "$bin/launch_terminal" "$checkout"
+fi
+
+if [[ $option == --initialize-project-root-instance ]]; then
+    state="$checkout/.project-root-instance"
+    if [[ -L $state ]]; then
+        printf 'Instance state directory must be inside the checkout: %s\n' "$state" >&2
+        exit 1
+    fi
+    architecture=$(uname -m) || exit 1
+    "$bin/$architecture/application_build_helper" "$option" --root "$checkout" || exit $?
 fi
 
 # Exec resolves the workspace helper relative to the desktop entry working directory.
@@ -87,11 +97,6 @@ DESKTOP
 chmod u+x -- "$temporary" || exit 1
 mv -fT -- "$temporary" "$shortcut" || exit 1
 if [[ $option == --initialize-project-root-instance ]]; then
-    state="$checkout/.project-root-instance"
-    if [[ -L $state ]]; then
-        printf 'Instance state directory must be inside the checkout: %s\n' "$state" >&2
-        exit 1
-    fi
     mkdir -p -- "$state" || exit 1
     marker_temporary=$(mktemp -- "$state/.initialized-root.XXXXXXXX") || exit 1
     printf '1:%s\n' "$checkout" > "$marker_temporary" || exit 1
