@@ -1,3 +1,4 @@
+package_source=rpm-fusion
 ninja-build
 cmake
 gcc-c++
@@ -40,4 +41,4 @@ libXrandr-devel
 libXi-devel
 libXext-devel
 libXxf86vm-devel
-install_groups=development-tools
+@development-tools
