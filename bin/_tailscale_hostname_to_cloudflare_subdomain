@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+
+import argparse
+import ipaddress
+import os
+import re
+import sys
+from urllib.parse import quote
+
+from service_api import ApiClient, CLOUDFLARE, TAILSCALE, cloudflare_list
+
+
+TAILSCALE_IPV4 = ipaddress.IPv4Network("100.64.0.0/10")
+DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
+
+def dns_name(value):
+    return value.strip().rstrip(".").lower()
+
+
+def device_names(device):
+    full_name = dns_name(device.get("name") or "")
+    hostname = dns_name(device.get("hostname") or "")
+    return full_name, hostname
+
+
+def select_device(devices):
+    if not devices:
+        raise RuntimeError("The Tailscale API returned no machines.")
+
+    devices = sorted(devices, key=lambda device: tuple(filter(None, device_names(device))))
+    page_size = 10
+    page = 0
+    last_page = (len(devices) - 1) // page_size
+
+    while True:
+        start = page * page_size
+        print(f"Tailscale machines (page {page + 1}/{last_page + 1})")
+        for index, device in enumerate(devices[start:start + page_size], start=start + 1):
+            full_name, hostname = device_names(device)
+            print(f"  {index}. {full_name or hostname}")
+
+        choice = dns_name(input("Machine number or hostname [n next, p previous, q cancel]: "))
+        if choice == "q":
+            return None
+        if choice in ("n", "p"):
+            next_page = page + (1 if choice == "n" else -1)
+            if 0 <= next_page <= last_page:
+                page = next_page
+            else:
+                print("No more pages in that direction.")
+            continue
+        if choice.isascii() and choice.isdecimal():
+            digits = choice.lstrip("0")
+            if digits and len(digits) <= len(str(len(devices))):
+                index = int(digits)
+                if index <= len(devices):
+                    return devices[index - 1]
+            print("Machine number out of range.")
+            continue
+
+        matches = []
+        for index, device in enumerate(devices, start=1):
+            full_name, hostname = device_names(device)
+            if choice and choice in (full_name, hostname, full_name.split(".")[0]):
+                matches.append(index)
+        if len(matches) == 1:
+            return devices[matches[0] - 1]
+        if matches:
+            numbers = ", ".join(map(str, matches))
+            print(f"Name is ambiguous. Choose a machine number ({numbers}).")
+        elif choice:
+            print("Machine not found.")
+
+
+def tailscale_ipv4(device):
+    addresses = set()
+    for address in device.get("addresses") or []:
+        try:
+            address = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        if address in TAILSCALE_IPV4:
+            addresses.add(address)
+    if len(addresses) != 1:
+        raise RuntimeError("The selected machine does not have exactly one Tailscale IPv4 address.")
+    return str(addresses.pop())
+
+
+def select_zone(zones):
+    if not zones:
+        raise RuntimeError("The Cloudflare token has access to no zones.")
+    while True:
+        choice = dns_name(input("Cloudflare domain (Enter to list): "))
+        matches = [zone for zone in zones if dns_name(zone["name"]) == choice]
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            raise RuntimeError("Multiple accessible zones share that name. Use a token scoped to one zone.")
+        if choice:
+            print("Domain not found in the zones accessible to this token.")
+        for name in sorted({zone["name"] for zone in zones}):
+            print(f"  {name}")
+
+
+def select_record_name(zone_name, default):
+    while True:
+        label = dns_name(input(f"Subdomain [{default}]: ")) or default
+        record_name = f"{label}.{zone_name}"
+        if DNS_LABEL.fullmatch(label) and len(record_name) <= 253:
+            return record_name
+        print("Enter a DNS label of up to 63 letters, digits, or hyphens.")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="tailscale_hostname_to_cloudflare_subdomain",
+        description="Create a DNS-only Cloudflare A record pointing to a Tailscale machine.",
+        epilog="Set TAILSCALE_API_TOKEN and CLOUDFLARE_API_TOKEN to override the Linux keyring. "
+               "If a token is missing, the tool shows where to create one and prompts privately. "
+               "Use TAILSCALE_TAILNET to override the token's default tailnet.",
+    )
+    parser.parse_args()
+
+    tailnet = os.environ.get("TAILSCALE_TAILNET", "-").strip() or "-"
+    tailscale = ApiClient(TAILSCALE, profile=tailnet if tailnet != "-" else "default")
+    devices = tailscale.request(f"/tailnet/{quote(tailnet, safe='')}/devices").get("devices")
+    if not isinstance(devices, list):
+        raise RuntimeError("Tailscale did not return a device list.")
+    device = select_device(devices)
+    if device is None:
+        print("Cancelled.")
+        return
+    address = tailscale_ipv4(device)
+    full_name, hostname = device_names(device)
+    print(f"Selected {full_name or hostname} ({address}).")
+
+    cloudflare = ApiClient(CLOUDFLARE)
+    zone = select_zone(list(cloudflare_list(cloudflare, "/zones")))
+    path = f"/zones/{quote(zone['id'], safe='')}/dns_records"
+    default = (full_name or hostname).split(".")[0]
+    name = select_record_name(dns_name(zone["name"]), default)
+    records = list(cloudflare_list(cloudflare, path, name=name))
+    existing = [
+        record for record in records
+        if dns_name(record["name"]) == name and (
+            record["type"] in ("A", "CNAME", "NS")
+            or (record["type"] == "AAAA" and record.get("proxied") is True)
+        )
+    ]
+    if existing:
+        if (
+            len(existing) == 1
+            and existing[0]["type"] == "A"
+            and existing[0]["content"] == address
+            and existing[0].get("proxied") is False
+        ):
+            print(f"DNS-only A record already exists: {name} -> {address}")
+            return
+        raise RuntimeError(f"A conflicting DNS record already exists for {name}.")
+
+    if input(f"Create DNS-only A record {name} -> {address}? [y/N] ").strip().lower() not in ("y", "yes"):
+        print("Cancelled.")
+        return
+
+    cloudflare.request(path, {
+        "type": "A", "name": name, "content": address, "ttl": 1, "proxied": False,
+    })
+    print(f"Created DNS-only A record: {name} -> {address}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (EOFError, KeyboardInterrupt):
+        print("\nCancelled.", file=sys.stderr)
+        sys.exit(130)
+    except RuntimeError as error:
+        print(error, file=sys.stderr)
+        sys.exit(1)

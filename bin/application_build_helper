@@ -4,6 +4,10 @@ bin=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || exit 1
 
 option=${1:-}
 case $option in
+    --tailscale-hostname-to-cloudflare-subdomain)
+        shift
+        exec "$bin/_tailscale_hostname_to_cloudflare_subdomain" "$@"
+        ;;
     --shell|--create-shortcut-executables|--initialize-project-root|--initialize-project-root-instance)
         shift
         checkout=
