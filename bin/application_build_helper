@@ -50,7 +50,7 @@ if [[ $option == --initialize-project-root ]]; then
     if [[ ! -x "$checkout/tool/shell" ]] || ! cmp -s -- "$template" "$checkout/tool/shell"; then
         install -m 755 -- "$template" "$checkout/tool/shell" || exit 1
     fi
-    for rule in /shell.desktop /.project-root-instance/ /_project_root_instance/; do
+    for rule in /shell.desktop /_project_root_instance/; do
         if ! grep -Fxq -- "$rule" "$checkout/.gitignore" 2>/dev/null; then
             printf '\n%s\n' "$rule" >> "$checkout/.gitignore" || exit 1
         fi
@@ -68,13 +68,23 @@ if [[ $option == --shell ]]; then
 fi
 
 if [[ $option == --initialize-project-root-instance ]]; then
-    state="$checkout/.project-root-instance"
+    state="$checkout/_project_root_instance"
     if [[ -L $state ]]; then
         printf 'Instance state directory must be inside the checkout: %s\n' "$state" >&2
         exit 1
     fi
     architecture=$(uname -m) || exit 1
     "$bin/$architecture/application_build_helper" "$option" --root "$checkout" || exit $?
+    # Bundled helpers from older revisions may still generate the old path.
+    legacy_environment="$checkout/_root_project_instance/_environment"
+    if [[ -r "$legacy_environment" && ! -r "$state/_environment" ]]; then
+        mkdir -p -- "$state" || exit 1
+        mv -n -- "$legacy_environment" "$state/_environment" || exit 1
+    fi
+    if [[ ! -r "$state/_environment" ]]; then
+        printf 'Missing generated shell environment: %s/_environment\n' "$state" >&2
+        exit 1
+    fi
 fi
 
 # Exec resolves the workspace helper relative to the desktop entry working directory.
