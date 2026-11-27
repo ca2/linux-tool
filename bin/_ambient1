@@ -1,5 +1,5 @@
 
-. $HOME/code/operating_system/tool/bin/defer_ssh_agent
+. defer_ssh_agent
 
 . ${HOME}/application/integration/code/.ambient
 
