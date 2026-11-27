@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-ca2_run_workspace_shell() {
-    unset -f ca2_run_workspace_shell
+run_workspace_shell() {
+    unset -f run_workspace_shell
     local checkout shell_script initializer initialized_root
     checkout=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P) || return 1
     shell_script="$checkout/operating_system/operating_system-linux/tool/shell"
@@ -28,4 +28,4 @@ ca2_run_workspace_shell() {
     fi
 }
 
-ca2_run_workspace_shell
+run_workspace_shell
