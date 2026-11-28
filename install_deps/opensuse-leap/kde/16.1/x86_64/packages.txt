@@ -44,3 +44,5 @@ ffmpeg-devel
 Mesa-libGLESv3-devel
 assimp-devel
 glew-devel
+wayland-devel
+wayland-protocols-devel
