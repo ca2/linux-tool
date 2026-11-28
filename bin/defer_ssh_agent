@@ -4,10 +4,21 @@ ca2_defer_ssh_agent() {
     unset -f ca2_defer_ssh_agent
     local identity="$HOME/.ssh/id_auth"
     local cache_dir="${XDG_RUNTIME_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}}/ca2-ssh-agent"
-    local agent_environment
+    local agent_environment identities identity_info fingerprint
 
-    if ssh-add -l >/dev/null 2>&1 || [[ ! -f "$identity" ]]; then
+    if [[ ! -f "$identity" ]]; then
         return 0
+    fi
+
+    if identities=$(ssh-add -l 2>/dev/null) || [[ $? == 1 ]]; then
+        if identity_info=$(ssh-keygen -lf "$identity" 2>/dev/null); then
+            read -r _ fingerprint _ <<< "$identity_info"
+            if [[ -n $fingerprint && $identities == *" $fingerprint "* ]]; then
+                return 0
+            fi
+        fi
+        ssh-add "$identity" >/dev/null
+        return $?
     fi
 
     agent_environment=$(

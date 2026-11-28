@@ -74,6 +74,9 @@ if [[ $option == --initialize-project-root-instance ]]; then
         exit 1
     fi
     architecture=$(uname -m) || exit 1
+    if ! . "$bin/defer_ssh_agent"; then
+        printf '%s\n' 'Could not initialize the fallback SSH agent.' >&2
+    fi
     "$bin/$architecture/application_build_helper" "$option" --root "$checkout" || exit $?
     # Bundled helpers from older revisions may still generate the old path.
     legacy_environment="$checkout/_root_project_instance/_environment"
