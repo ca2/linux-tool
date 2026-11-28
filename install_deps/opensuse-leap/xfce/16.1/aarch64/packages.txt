@@ -24,7 +24,14 @@ gtk3-devel
 libappindicator3-devel
 alsa-devel
 libinput-devel
-ffmpeg-devel
+ffmpeg-7-libavcodec-devel
+ffmpeg-7-libavdevice-devel
+ffmpeg-7-libavfilter-devel
+ffmpeg-7-libavformat-devel
+ffmpeg-7-libavutil-devel
+ffmpeg-7-libpostproc-devel
+ffmpeg-7-libswresample-devel
+ffmpeg-7-libswscale-devel
 xcb-util-image-devel
 motif-devel
 libv4l-devel
@@ -32,6 +39,6 @@ glm-devel
 glew-devel
 assimp-devel
 freeimage-devel
-libudev-devel
+systemd-devel
 libXxf86vm-devel
-Mesa-libGLESv3-devels
+Mesa-libGLESv3-devel
